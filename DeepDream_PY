@@ -1,0 +1,120 @@
+import torch
+import torch.nn.functional as F
+from torchvision import models, transforms
+from PIL import Image
+import numpy as np
+import argparse
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter import ttk
+import threading
+
+# Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load model
+model = models.inception_v3(pretrained=True, aux_logits=False)
+model.to(device).eval()
+
+# Target layer for dreaming
+target_layer = model.Mixed_5b
+
+# Hook to capture activations
+activations = []
+def hook_fn(module, input, output):
+    activations.append(output)
+
+target_layer.register_forward_hook(hook_fn)
+
+# Image preprocessing
+def preprocess(image):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+    return transform(image).unsqueeze(0).to(device)
+
+def deprocess(tensor):
+    image = tensor.squeeze().detach().cpu().numpy()
+    image = np.moveaxis(image, 0, 2)
+    image = np.clip(image * 255, 0, 255).astype(np.uint8)
+    return Image.fromarray(image)
+
+# DeepDream core logic
+def deep_dream(image_tensor, iterations=20, lr=0.01):
+    image_tensor = image_tensor.clone().requires_grad_(True)
+    for _ in range(iterations):
+        activations.clear()
+        model(image_tensor)
+        loss = activations[0].norm()
+        loss.backward()
+        with torch.no_grad():
+            grad = image_tensor.grad / (image_tensor.grad.std() + 1e-8)
+            image_tensor += lr * grad
+        image_tensor.grad.zero_()
+    return image_tensor.detach()
+
+# GUI application
+def run_deepdream_gui():
+    def select_input():
+        path = filedialog.askopenfilename()
+        if path:
+            input_path_var.set(path)
+
+    def select_output():
+        path = filedialog.asksaveasfilename(defaultextension=".jpg")
+        if path:
+            output_path_var.set(path)
+
+    def run_dream():
+        input_path = input_path_var.get()
+        output_path = output_path_var.get()
+        if not input_path or not output_path:
+            messagebox.showerror("Error", "Please select input and output paths.")
+            return
+
+        def task():
+            try:
+                image = Image.open(input_path).convert('RGB')
+                input_tensor = preprocess(image)
+                dreamed_tensor = deep_dream(input_tensor, int(iter_var.get()), float(lr_var.get()))
+                output_image = deprocess(dreamed_tensor)
+                output_image.save(output_path)
+                messagebox.showinfo("Success", f"Saved to {output_path}")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        threading.Thread(target=task).start()
+
+    root = tk.Tk()
+    root.title("DeepDream GUI")
+
+    input_path_var = tk.StringVar()
+    output_path_var = tk.StringVar()
+    iter_var = tk.StringVar(value="20")
+    lr_var = tk.StringVar(value="0.01")
+
+    ttk.Label(root, text="Input Image").grid(row=0, column=0, padx=5, pady=5)
+    ttk.Entry(root, textvariable=input_path_var, width=40).grid(row=0, column=1)
+    ttk.Button(root, text="Browse", command=select_input).grid(row=0, column=2)
+
+    ttk.Label(root, text="Output Image").grid(row=1, column=0, padx=5, pady=5)
+    ttk.Entry(root, textvariable=output_path_var, width=40).grid(row=1, column=1)
+    ttk.Button(root, text="Browse", command=select_output).grid(row=1, column=2)
+
+    ttk.Label(root, text="Iterations").grid(row=2, column=0)
+    ttk.Entry(root, textvariable=iter_var).grid(row=2, column=1)
+
+    ttk.Label(root, text="Learning Rate").grid(row=3, column=0)
+    ttk.Entry(root, textvariable=lr_var).grid(row=3, column=1)
+
+    ttk.Button(root, text="Run DeepDream", command=run_dream).grid(row=4, column=1, pady=10)
+
+    root.mainloop()
+
+# Entry point
+def main():
+    run_deepdream_gui()
+
+if __name__ == '__main__':
+    main()
